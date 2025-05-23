@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/rdsdata"
 	rdstypes "github.com/aws/aws-sdk-go-v2/service/rdsdata/types"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -93,9 +94,16 @@ var rdsClient *rdsdata.Client
 var rateLimiter = make(chan struct{}, 1)
 
 func init() {
+	// Configure structured logging
+	logrus.SetFormatter(&logrus.JSONFormatter{})
+	logrus.SetLevel(logrus.InfoLevel)
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
+
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
-		panic(fmt.Sprintf("unable to load SDK config: %v", err))
+		logrus.WithError(err).Fatal("Unable to load SDK config")
 	}
 	rdsClient = rdsdata.NewFromConfig(cfg)
 
@@ -120,7 +128,7 @@ func validateEnvironmentVariables() {
 	required := []string{"EDAMAM_APP_ID", "EDAMAM_APP_KEY", "DB_NAME", "DB_CLUSTER_ARN", "DB_SECRET_ARN"}
 	for _, env := range required {
 		if os.Getenv(env) == "" {
-			panic(fmt.Sprintf("required environment variable %s is not set", env))
+			logrus.WithField("env_var", env).Fatal("Required environment variable is not set")
 		}
 	}
 }
@@ -158,7 +166,7 @@ func validateLimit(limitStr string) (int, error) {
 }
 
 func searchEdamam(ctx context.Context, query string) ([]FoodItem, error) {
-	log.Printf("INFO: Searching Edamam API for: %s\n", query)
+	logrus.WithField("query", query).Info("Searching Edamam API")
 	
 	// Context timeout for rate limiter
 	select {
@@ -186,14 +194,18 @@ func searchEdamam(ctx context.Context, query string) ([]FoodItem, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("ERROR: Edamam API request failed: %v\n", err)
+		logrus.WithError(err).WithField("query", query).Error("Edamam API request failed")
 		return nil, fmt.Errorf("edamam API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		log.Printf("ERROR: Edamam API error response: %s\n", string(body))
+		logrus.WithFields(logrus.Fields{
+			"status_code": resp.StatusCode,
+			"response_body": string(body),
+			"query": query,
+		}).Error("Edamam API error response")
 		return nil, fmt.Errorf("edamam API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -202,16 +214,22 @@ func searchEdamam(ctx context.Context, query string) ([]FoodItem, error) {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	log.Printf("DEBUG: Raw Edamam Response: %s\n", string(body))
+	logrus.WithFields(logrus.Fields{
+		"query": query,
+		"response_size": len(body),
+	}).Debug("Raw Edamam Response received")
 	
 	var searchResult EdamamSearchResponse
 	if err := json.Unmarshal(body, &searchResult); err != nil {
-		log.Printf("ERROR: Failed to decode response: %v\n", err)
+		logrus.WithError(err).WithField("query", query).Error("Failed to decode Edamam response")
 		return nil, fmt.Errorf("failed to decode edamam response: %w", err)
 	}
 
-	log.Printf("INFO: Processing %d parsed items and %d hints\n", 
-		len(searchResult.Parsed), len(searchResult.Hints))
+	logrus.WithFields(logrus.Fields{
+		"query": query,
+		"parsed_items": len(searchResult.Parsed),
+		"hint_items": len(searchResult.Hints),
+	}).Info("Processing Edamam response")
 
 	var items []FoodItem
 	for _, hint := range searchResult.Hints {
@@ -219,7 +237,11 @@ func searchEdamam(ctx context.Context, query string) ([]FoodItem, error) {
 		items = append(items, item)
 	}
 
-	log.Printf("INFO: Converted %d items from Edamam response\n", len(items))
+	logrus.WithFields(logrus.Fields{
+		"query": query,
+		"converted_items": len(items),
+	}).Info("Converted items from Edamam response")
+	
 	return items, nil
 }
 
